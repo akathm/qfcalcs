@@ -1,0 +1,90 @@
+with passport_raw as (select *
+                              , case
+                                    when passport.evidence ilike '%false%' then substring(passport.evidence, 64, 5)
+                                    when passport.evidence ilike '%true%' then substring(passport.evidence, 63, 5)
+                                         end as raw_score
+                         from grants_rounds.bulk_passport_alpha passport
+), scores as (select address
+                   , score
+                   , status
+                   , last_score_timestamp
+                   , case when raw_score like '0%' then '0' else raw_score end as raw_score
+              from passport_raw
+), rates AS (select *
+                   ,  case when token = 'DAI' then 1539.515
+                           when token = 'ETH' then 1 end
+                                                             AS exchangeRate
+                --from grants_rounds.alpha_opensource_votes
+                --from grants_rounds.alpha_ethinfra_votes
+                from grants_rounds.alpha_climate_votes
+)/*, final AS (select
+                source_wallet   AS address
+                , case when (source_wallet in (select address from grants_rounds.loki)
+                            OR source_wallet in (select address from grants_rounds.past_sybils)
+                            OR source_wallet in (select address from grants_rounds.suspected)
+                            ) then 1
+                    else 1 END
+                                                                    AS outcome
+              --from grants_rounds.alpha_opensource_votes
+              --from grants_rounds.alpha_ethinfra_votes
+              from grants_rounds.alpha_climate_votes
+)*/
+, totals as (select distinct
+   proj.id                                  AS projectID
+   , proj.project_title::varchar(10)        AS project_title
+   , votes.source_wallet                    AS supporterWallet
+   , votes.id                               AS txnHash
+   , votes.token                            AS token
+   , votes.amount/rates.exchangeRate        AS amount
+   , rates.exchangeRate                     AS exchangeRate
+   , votes.created_at                       AS createdAt
+   , case when (scores.score = 1
+                AND (votes.amount/rates.exchangeRate) > 0.0008) --$1 = 0.000649 native eth when taking rolling avg
+            then 1 --then final.outcome
+       else 0 end                           AS voteCoefficient
+   , current_date                           AS updatedAt
+   , max(scores.raw_score)                  AS passportScore
+   , max(scores.score)                      AS passportPass
+   , 13                                     AS communityID
+--from grants_rounds.alpha_opensource proj
+--left join grants_rounds.alpha_opensource_votes votes
+--from grants_rounds.alpha_ethinfra proj
+--left join grants_rounds.alpha_ethinfra_votes votes
+from grants_rounds.alpha_climate proj
+left join grants_rounds.alpha_climate_votes votes
+    ON votes.destination_wallet = proj.wallet_address
+left join scores
+    ON scores.address = votes.source_wallet
+left join rates
+    ON rates.source_wallet = votes.source_wallet
+--left join final
+--    ON final.address = votes.source_wallet
+group by 2, 1, 3, 4, 5, 6, 7, 8, 9, 10, 13
+
+) --------remove cte treatment for git
+, votes as (select distinct supporterwallet
+                      , txnhash
+                      , projectid
+                      , project_title
+                      , amount * 1000000000000000000 as whole_eth_amt
+                      , sqrt((amount * 1000000000000000000))*votecoefficient as vote
+               from totals
+               where passportpass = 1
+               AND (amount/exchangeRate) > 0.0008
+)
+, project_calcs as (select project_title
+                 , sum(vote) as project_votes
+                 , (229.265) * 1000000000000000000 * .1 as match_cap --.05 oss; .2 ethinfra; .1 climate;
+            from votes
+            group by 1
+            order by 2 desc
+)
+, round_calcs as (select *
+                  , sum(project_votes) OVER () as total_votes
+                  , project_votes/(sum(project_votes) OVER ()) * (229.265) as portion_match
+                  from project_calcs
+)
+select project_title
+       , case when portion_match > (match_cap*0.000000000000000001) then match_cap*0.000000000000000001
+                        else portion_match end AS applicable_match
+from round_calcs
